@@ -21,17 +21,22 @@ def world_to_px(x, y, ox, oy, res, H):
     return int((x - ox) / res), H - int((y - oy) / res)
 
 
-def draw_overlay(map_img, points_by_pid, title, out_path, dot_r=2):
+def draw_overlay(map_img, points_by_pid, title, out_path,
+                 line_width=2, max_step_px=16):
     W, H = map_img.size
     canvas = map_img.copy()
     draw = ImageDraw.Draw(canvas)
     for pid, pts in sorted(points_by_pid.items()):
-        if not pts:
+        if len(pts) < 2:
             continue
         r, g, b = pts[0][2], pts[0][3], pts[0][4]
         color = (int(r*255), int(g*255), int(b*255))
-        for px, py, _, _, _ in pts:
-            draw.ellipse([px-dot_r, py-dot_r, px+dot_r, py+dot_r], fill=color)
+        for i in range(len(pts) - 1):
+            x1, y1 = pts[i][0], pts[i][1]
+            x2, y2 = pts[i+1][0], pts[i+1][1]
+            if ((x2-x1)**2 + (y2-y1)**2) ** 0.5 > max_step_px:
+                continue
+            draw.line([(x1, y1), (x2, y2)], fill=color, width=line_width)
     try:
         font = ImageFont.truetype(
             '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 16)

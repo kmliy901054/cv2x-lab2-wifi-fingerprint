@@ -28,7 +28,9 @@ def main():
         '~/ros2_ws/wifi_data/trajectories_overlay_combined.png'))
     ap.add_argument('--out-white', default=os.path.expanduser(
         '~/ros2_ws/wifi_data/trajectories_overlay_combined_white.png'))
-    ap.add_argument('--dot-radius', type=int, default=2)
+    ap.add_argument('--line-width', type=int, default=2)
+    ap.add_argument('--max-step-m', type=float, default=0.8,
+                    help='Do not connect points further than this apart (skips AMCL teleports)')
     args = ap.parse_args()
 
     with open(args.map_yaml) as f:
@@ -67,15 +69,19 @@ def main():
             canvas_arr[obs] = [60, 60, 60]
             canvas = Image.fromarray(canvas_arr)
             draw = ImageDraw.Draw(canvas)
+        max_step_px = args.max_step_m / res
         for pid, pts in sorted(paths.items()):
-            if not pts:
+            if len(pts) < 2:
                 continue
             r, g, b = pts[0][2], pts[0][3], pts[0][4]
             color = (int(r*255), int(g*255), int(b*255))
-            for px, py, _, _, _ in pts:
-                draw.ellipse([px-args.dot_radius, py-args.dot_radius,
-                              px+args.dot_radius, py+args.dot_radius],
-                             fill=color)
+            for i in range(len(pts) - 1):
+                x1, y1 = pts[i][0], pts[i][1]
+                x2, y2 = pts[i+1][0], pts[i+1][1]
+                dist_px = ((x2-x1)**2 + (y2-y1)**2) ** 0.5
+                if dist_px > max_step_px:
+                    continue  # skip teleport (AMCL initial pose 拉動 / convergence jump)
+                draw.line([(x1, y1), (x2, y2)], fill=color, width=args.line_width)
         try:
             font = ImageFont.truetype(
                 '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 16)
