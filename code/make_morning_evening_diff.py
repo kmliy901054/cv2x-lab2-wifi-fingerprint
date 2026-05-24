@@ -40,6 +40,19 @@ def chunked_gaussian_interp(samples_xy, samples_v, grid_xy, bandwidth, chunk=400
     return out.reshape(H, W)
 
 
+def nearest_sample_distance(samples_xy, grid_xy, chunk=4000):
+    H, W, _ = grid_xy.shape
+    flat = grid_xy.reshape(-1, 2)
+    N = len(flat)
+    out = np.empty(N, dtype=float)
+    for i in range(0, N, chunk):
+        block = flat[i:i+chunk]
+        diff = block[:, None, :] - samples_xy[None, :, :]
+        d2 = (diff ** 2).sum(axis=-1)
+        out[i:i+chunk] = np.sqrt(d2.min(axis=1))
+    return out.reshape(H, W)
+
+
 def diff_to_rgba(diff, vmin=-15, vmax=15, alpha=200):
     """blue = signal got weaker (evening worse), red = stronger (evening better)."""
     H, W = diff.shape
@@ -101,6 +114,10 @@ def main():
     ap.add_argument('--bandwidth', type=float, default=1.0)
     ap.add_argument('--min-samples', type=int, default=30,
                     help='AP must have >= this many samples in BOTH morning and evening')
+    ap.add_argument('--max-sample-dist', type=float, default=1.5,
+                    help='Hide diff cells whose nearest sample > N meters away (both batches)')
+    ap.add_argument('--unknown-pixel', type=int, default=128,
+                    help='Map pixel value treated as unknown / unexplored')
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -111,9 +128,11 @@ def main():
         meta = yaml.safe_load(f)
     pgm_path = os.path.join(os.path.dirname(args.map_yaml), meta['image'])
     map_img = Image.open(pgm_path).convert('RGB')
+    pgm_gray = np.array(Image.open(pgm_path))
     W, H = map_img.size
     res = meta['resolution']
     ox, oy = meta['origin'][0], meta['origin'][1]
+    geo_mask = pgm_gray != args.unknown_pixel
     # grid xy in map frame (each pixel center)
     xs = ox + (np.arange(W) + 0.5) * res
     ys = oy + (H - np.arange(H) - 0.5) * res    # image y inverted
@@ -194,6 +213,11 @@ def main():
         m_grid = chunked_gaussian_interp(m_xy, m_v, grid_xy, args.bandwidth)
         e_grid = chunked_gaussian_interp(e_xy, e_v, grid_xy, args.bandwidth)
         diff_grid = e_grid - m_grid
+        # Mask: need both morning and evening samples close to the cell + in mapped area
+        m_dist = nearest_sample_distance(m_xy, grid_xy)
+        e_dist = nearest_sample_distance(e_xy, grid_xy)
+        valid = geo_mask & (m_dist <= args.max_sample_dist) & (e_dist <= args.max_sample_dist)
+        diff_grid = np.where(valid, diff_grid, np.nan)
 
         rgba = diff_to_rgba(diff_grid, vmin=-15, vmax=15)
         overlay = Image.fromarray(rgba, 'RGBA')

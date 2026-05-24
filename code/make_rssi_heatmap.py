@@ -47,6 +47,20 @@ def chunked_gaussian_interp(samples_xy, samples_v, grid_xy, bandwidth, chunk=400
     return out.reshape(H, W)
 
 
+def nearest_sample_distance(samples_xy, grid_xy, chunk=4000):
+    """For each grid cell, distance (m) to nearest sample."""
+    H, W, _ = grid_xy.shape
+    flat = grid_xy.reshape(-1, 2)
+    N = len(flat)
+    out = np.empty(N, dtype=float)
+    for i in range(0, N, chunk):
+        block = flat[i:i+chunk]
+        diff = block[:, None, :] - samples_xy[None, :, :]
+        d2 = (diff ** 2).sum(axis=-1)
+        out[i:i+chunk] = np.sqrt(d2.min(axis=1))
+    return out.reshape(H, W)
+
+
 def rssi_to_rgba(grid, vmin=-90, vmax=-30, alpha=180):
     H, W = grid.shape
     rgba = np.zeros((H, W, 4), dtype=np.uint8)
@@ -89,6 +103,10 @@ def main():
     ap.add_argument('--output-dir', default=os.path.expanduser('~/ros2_ws/wifi_data'))
     ap.add_argument('--top-n', type=int, default=8)
     ap.add_argument('--bandwidth', type=float, default=1.0)
+    ap.add_argument('--max-sample-dist', type=float, default=1.5,
+                    help='Hide heatmap cells whose nearest sample > N meters away')
+    ap.add_argument('--unknown-pixel', type=int, default=128,
+                    help='Map pixel value treated as unknown / unexplored')
     args = ap.parse_args()
 
     # ── Map ──────────────────────────────────────────
@@ -133,6 +151,12 @@ def main():
     rgb_base = np.stack([pgm]*3, axis=-1).astype(np.uint8)
     base_img = Image.fromarray(rgb_base).convert('RGBA')
 
+    # Geographic mask: only show heatmap where map is observed (not unknown).
+    # Cartographer marks unobserved cells with args.unknown_pixel (typically 128).
+    geo_mask = pgm != args.unknown_pixel
+    print(f'geo mask: {geo_mask.sum()}/{geo_mask.size} cells observed '
+          f'({100*geo_mask.mean():.1f}% of map)')
+
     # ── Per-AP heatmaps ──────────────────────────────
     out_top_dir = os.path.join(args.output_dir, 'heatmap_TOP')
     os.makedirs(out_top_dir, exist_ok=True)
@@ -156,6 +180,10 @@ def main():
               f'avg {rs.mean():.1f}  std {rs.std():.1f}')
 
         heat = chunked_gaussian_interp(xy, rs, grid_xy, args.bandwidth)
+        # Mask: hide cells too far from any sample, or outside observed map
+        dist = nearest_sample_distance(xy, grid_xy)
+        mask = geo_mask & (dist <= args.max_sample_dist)
+        heat = np.where(mask, heat, np.nan)
         rgba = rssi_to_rgba(heat)
         overlay = Image.fromarray(rgba, mode='RGBA')
         result = Image.alpha_composite(base_img, overlay)
@@ -200,6 +228,14 @@ def main():
 
     # ── Combined "best AP" RSSI (max over top-N) ────
     print('\nbuilding combined-best heatmap...')
+    # Union of all top-N samples for shared mask
+    all_top_xy = np.concatenate([
+        np.array([(s[0], s[1]) for s in samples])
+        for _, samples in top
+    ], axis=0)
+    union_dist = nearest_sample_distance(all_top_xy, grid_xy)
+    union_mask = geo_mask & (union_dist <= args.max_sample_dist)
+
     best = np.full((H, W), -np.inf)
     for bssid, samples in top:
         xy = np.array([(s[0], s[1]) for s in samples], dtype=float)
@@ -209,6 +245,7 @@ def main():
         valid = ~np.isnan(heat)
         best = np.where(valid & (heat > best), heat, best)
     best = np.where(np.isinf(best), np.nan, best)
+    best = np.where(union_mask, best, np.nan)
     rgba = rssi_to_rgba(best)
     overlay = Image.fromarray(rgba, mode='RGBA')
     result = Image.alpha_composite(base_img, overlay)
@@ -234,6 +271,9 @@ def main():
         winning = valid & (heat > best_rssi)
         dom = np.where(winning, ap_idx, dom)
         best_rssi = np.where(winning, heat, best_rssi)
+    # Apply union mask (same as combined-best — only show where any top AP near)
+    dom = np.where(union_mask, dom, -1)
+
     rgba = np.zeros((H, W, 4), dtype=np.uint8)
     for ap_idx in range(len(top)):
         h = ap_idx / max(1, len(top))
